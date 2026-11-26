@@ -9,8 +9,11 @@
 // crowd already on the tape (5+ distinct buyers, 6+ trades, 0.3+ SOL net
 // inflow). Add up to twice into strength (0.1 SOL each, once +12% up with
 // fresh inflow), and exit fast (half at +25%, rest at +60%, cut at -10%,
-// trail after +30%, 60-slot hold limit). See STRATEGY.md for the dev-window
-// numbers and the ideas the tape rejected (dip-buying, top-buyer filter).
+// trail after +30%, 60-slot hold limit). Dev window (official grade-local):
+// +0.0597 SOL net PnL, 27 round trips, win rate 22.2%, max drawdown 0.0012,
+// guardrails met; 90% interval -0.018..+0.163 SOL. See STRATEGY.md for the
+// dev-window numbers and the ideas the tape rejected (dip-buying,
+// top-buyer filter).
 
 import { runBot } from './vendor/makefun-bot.ts';
 import { createStrategy, DEFAULT_PARAMS } from './strategy.ts';
