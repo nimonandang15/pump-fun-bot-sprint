@@ -324,6 +324,7 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
           mode = 'dip';
         }
         if (mode === null) continue;
+        let amount = BigInt(Math.floor(p.stakeSol * 1e9));
         const capLamports = state.maxBuyLamports(mint);
         if (amount > capLamports) amount = capLamports;
         if (amount > free - txFee) amount = free - txFee;
