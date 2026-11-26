@@ -1,29 +1,36 @@
-// Second-wave scalper for the pump.fun bonding-curve replay (agent-fun/replay/v2).
+// Delayed-ramp scalper for the pump.fun bonding-curve replay (agent-fun/replay/v2).
 //
-// What the dev window's tape shows (24h, 1222 launches, 128,058 events):
+// What the dev window's tape shows (24h, 1,222 launches, 128,058 events):
 // a launch's first move is violent and fast — the median coin is already +17%
 // over its create price 5 slots in and peaks around 7 slots — and then it
 // decays back toward its create price over the next few hundred slots. The
 // house momentum pilot (-9.49 SOL) loses by chasing that move after it has
-// printed. This bot instead takes two small, early, strictly time-boxed shots:
+// printed. Buying the opening seconds loses too: at age 3-5 the tape is too
+// thin to tell a real crowd from noise, and the fill lands two slots later,
+// after the ramp. This bot instead waits for the delayed ramp: a coin that
+// is STILL near its create price (at most +18% over create) at 12-25 slots
+// old, with a real crowd already on the tape (at least 5 distinct buyers, 6
+// trades, 0.3 SOL of net inflow) and real SOL reserves of 2-80, has not
+// pumped yet but has the buyers to do it. Buy one small fixed stake.
 //
-//   Mode RAMP — ride the opening ramp itself. While a coin is at most a few
-//   slots old, its tape already shows a real crowd (several distinct buyers,
-//   real net SOL flowing in) and the price has not yet run away, buy a small
-//   fixed stake. The fill lands two slots later, still inside the ramp.
+// The harness caps each batch's buys at 1% of a coin's real SOL reserve, so
+// the first buy on a young coin is always small. When the position is already
+// up at least +12% and fresh net SOL keeps flowing in, the reserve has grown
+// and the bot adds up to twice (0.1 SOL each) — winners get real size, losers
+// stay probes. No coin is ever entered twice and no loser is averaged down.
 //
-//   Mode DIP — buy the first pullback of a coin that already proved it can
-//   run. A coin that spiked at least +40% over create in its first 30 slots
-//   and then fell back near its create price has shown both demand and a
-//   discount; buy the dip once, small and fixed.
+// Exits, checked every batch against the curve's latest reserves: take half
+// at +25%, take the rest at +60%, cut at -10%, trail once +30% up (sell on
+// a 15% fall from the peak value), leave at once when the creator sells or a
+// single >= 1 SOL sell lands, and never hold longer than 60 slots. The 60-slot
+// hold matters: cutting it to 45 slots collapses the result, because the
+// winners need that long to run.
 //
-// Both modes share one exit ladder, checked every batch against the curve's
-// latest reserves: take half at +12%, take the rest at +28%, cut at -8%,
-// trail once +18% up (sell on a 10% fall from the peak value), leave at once
-// when the creator sells or a single >= 1 SOL sell lands, and never hold
-// longer than 45 slots. No coin is ever entered twice, no loser is averaged
-// down, and there is no pyramid: every entry is one fixed stake, so a bad
-// read costs the same small probe as a good read earns on.
+// Two ideas were tried and dropped because the tape rejects them: a dip mode
+// (buy the pullback of a coin that spiked >= +40% early) never fires with a
+// strict gate and loses ~0.07 SOL with a loose one, and a top-buyer-share
+// filter (largest buyer under 30% of buy SOL) cuts the trip count in half
+// and flips the second half negative.
 //
 // Deterministic by construction: no clock, no randomness, no I/O; iteration
 // only over insertion-ordered maps fed by the batch stream. Money math is
@@ -34,36 +41,19 @@
 import type { Batch, Bot, BotState, Done, OrderInput, Pubkey } from './vendor/makefun-bot.ts';
 
 export interface Params {
-  // --- Mode RAMP: ride the opening ramp ---
-  /** Youngest age (slots since CreateEvent) at which a ramp buy may be decided. */
-  rampMinAge: number;
-  /** Buy a ramp entry while the coin is at most this many slots old. */
-  rampMaxAge: number;
-  /** Distinct non-creator buyers the opening tape must show. */
-  rampMinBuyers: number;
-  /** Trades the opening tape must show. */
-  rampMinTrades: number;
-  /** Net buy SOL (buys minus sells) the opening tape must show. */
-  rampMinNetSol: number;
-  /** Price now over the create price, in bps: ramp entry window. */
-  rampMaxRunUpBps: number;
-  /** Largest single non-creator buyer's share of buy SOL, in bps, at most. */
-  rampMaxTopShareBps: number;
-  // --- Mode DIP: buy the first pullback after a proven spike ---
-  /** A dip entry needs the coin to have peaked at least this far over create (bps). */
-  dipPeakBps: number;
-  /** ... within this many slots of its CreateEvent. */
-  dipPeakAge: number;
-  /** ... and to have pulled back to at most this far over create (bps). */
-  dipMaxRunUpBps: number;
-  /** Oldest age (slots since CreateEvent) at which a dip entry may be decided. */
-  dipMaxAge: number;
-  /** Distinct non-creator buyers the tape must show for a dip entry. */
-  dipMinBuyers: number;
-  /** Net buy SOL the tape must show for a dip entry. */
-  dipMinNetSol: number;
-  // --- Shared ---
-  /** Real SOL reserve window at decision time, either mode. */
+  /** Youngest age (slots since CreateEvent) at which a buy may be decided. */
+  entryMinAge: number;
+  /** Oldest age (slots since CreateEvent) at which a buy may be decided. */
+  entryMaxAge: number;
+  /** Distinct non-creator buyers the tape must show. */
+  minBuyers: number;
+  /** Trades the tape must show. */
+  minTrades: number;
+  /** Net buy SOL (buys minus sells) the tape must show. */
+  minNetSol: number;
+  /** Price now over the create price, in bps, at most: the coin must not have pumped yet. */
+  maxRunUpBps: number;
+  /** Real SOL reserve window at decision time. */
   minRealSol: number;
   maxRealSol: number;
   /** Fixed stake per entry (SOL). Capped by the harness at 1% of real reserve. */
@@ -93,22 +83,25 @@ export interface Params {
   staleSlots: number;
   /** Most positions open at once (the harness cap is 5). */
   maxPositions: number;
+  /** Add to a winning position while it rises and money keeps flowing in. */
+  addOn: boolean;
+  /** SOL per add-on buy. */
+  addSol: number;
+  /** An add needs the position's value at least this far (bps) over its cost. */
+  addIfUpBps: number;
+  /** An add needs net SOL inflow since the entry of at least this. */
+  addNetSol: number;
+  /** Most add-on buys per position. */
+  maxAdds: number;
 }
 
 export const DEFAULT_PARAMS: Params = {
-  rampMinAge: 3,
-  rampMaxAge: 5,
-  rampMinBuyers: 6,
-  rampMinTrades: 8,
-  rampMinNetSol: 0.3,
-  rampMaxRunUpBps: 3500,
-  rampMaxTopShareBps: 3000,
-  dipPeakBps: 100000,
-  dipPeakAge: 30,
-  dipMaxRunUpBps: 1200,
-  dipMaxAge: 60,
-  dipMinBuyers: 8,
-  dipMinNetSol: 0.5,
+  entryMinAge: 12,
+  entryMaxAge: 25,
+  minBuyers: 5,
+  minTrades: 6,
+  minNetSol: 0.3,
+  maxRunUpBps: 1800,
   minRealSol: 2,
   maxRealSol: 80,
   stakeSol: 0.05,
@@ -121,11 +114,16 @@ export const DEFAULT_PARAMS: Params = {
   slBps: 1000,
   trailArmBps: 3000,
   trailBps: 1500,
-  maxHold: 150,
+  maxHold: 60,
   exitOnDevSell: true,
   bigSellSol: 1.0,
   staleSlots: 300,
   maxPositions: 5,
+  addOn: true,
+  addSol: 0.1,
+  addIfUpBps: 1200,
+  addNetSol: 0.2,
+  maxAdds: 2,
 };
 
 const BPS = 10_000n;
@@ -147,17 +145,11 @@ interface Tape {
   vt0: bigint;
   trades: number;
   buyers: Set<Pubkey>;
-  /** SOL bought by each non-creator wallet (lamports). */
-  buyByUser: Map<Pubkey, bigint>;
   bought: bigint;
   sold: bigint;
   devSold: boolean;
   bigSell: boolean;
   lastTradeSlot: number;
-  /** Highest run-up over create seen so far, in bps. */
-  peakRunUpBps: number;
-  /** The coin spiked >= dipPeakBps while still young (age <= dipPeakAge). */
-  spikedEarly: boolean;
   /** An entry was sent for this coin (one shot per coin, win or lose). */
   entered: boolean;
 }
@@ -166,6 +158,11 @@ interface Open {
   openedSlot: number;
   peakValue: bigint;
   tookTp1: boolean;
+  /** Net bought-minus-sold lamports when the entry buy was sent. */
+  entryNet: bigint;
+  /** Decision price (vq/vt) of the entry buy. */
+  entryPrice: number;
+  adds: number;
 }
 
 export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
@@ -184,14 +181,11 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
         vt0: 0n,
         trades: 0,
         buyers: new Set(),
-        buyByUser: new Map(),
         bought: 0n,
         sold: 0n,
         devSold: false,
         bigSell: false,
         lastTradeSlot: -1,
-        peakRunUpBps: 0,
-        spikedEarly: false,
         entered: false,
       };
       tapes.set(mint, t);
@@ -238,10 +232,7 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
           t.lastTradeSlot = e.slot;
           if (e.is_buy) {
             t.bought += sol;
-            if (e.user !== t.creator) {
-              t.buyers.add(e.user);
-              t.buyByUser.set(e.user, (t.buyByUser.get(e.user) ?? 0n) + sol);
-            }
+            if (e.user !== t.creator) t.buyers.add(e.user);
           } else {
             t.sold += sol;
             if (e.user === t.creator) t.devSold = true;
@@ -249,16 +240,6 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
           }
           touched.add(e.mint);
         }
-      }
-
-      // Refresh each touched coin's peak run-up from the latest curve reserves.
-      for (const mint of touched) {
-        const t = tapes.get(mint);
-        const curve = state.curves.get(mint);
-        if (t === undefined || curve === undefined || t.createSlot < 0) continue;
-        const r = runUpBps(t, curve.virtual_quote_reserves, curve.virtual_token_reserves);
-        if (r > t.peakRunUpBps) t.peakRunUpBps = r;
-        if (!t.spikedEarly && r >= p.dipPeakBps && now - t.createSlot <= p.dipPeakAge) t.spikedEarly = true;
       }
 
       // ---- Exits first: never leave a loser open while opening a new trade. ----
@@ -304,10 +285,45 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
         pendingByMint.set(mint, 'sell');
       }
 
-      // ---- Entries: one fixed-stake shot per coin, ramp mode or dip mode. ----
+      // ---- Add-ons: scale into working positions while they rise. ----
+      // The harness caps each batch's buys at 1% of a coin's real SOL reserve,
+      // so the first buy on a young coin is always small. When the position is
+      // already up and fresh net SOL keeps flowing in, the reserve has grown
+      // and a further buy can take real size — winners get bigger, losers stay
+      // probes. At most maxAdds adds per position, ever.
       let free = state.freeCashLamports();
       let slotsLeft = p.maxPositions - state.committedPositionCount();
+      if (p.addOn) {
+        for (const [mint, o] of open) {
+          if (orders.length >= cap) break;
+          const pos = state.positions.get(mint);
+          const curve = state.curves.get(mint);
+          if (pos === undefined || curve === undefined || curve.complete) continue;
+          if (pendingByMint.has(mint)) continue;
+          if (o.adds >= p.maxAdds) continue;
+          const tokens = pos.token_amount;
+          const cost = pos.cost_lamports;
+          const value = sellValue(tokens, curve.virtual_quote_reserves, curve.virtual_token_reserves) - txFee;
+          if (value < (cost * (BPS + BigInt(p.addIfUpBps))) / BPS) continue;
+          const t = tapes.get(mint);
+          if (t === undefined) continue;
+          if (Number(t.bought - t.sold - o.entryNet) / 1e9 < p.addNetSol) continue;
+          const priceNow = Number(curve.virtual_quote_reserves) / Number(curve.virtual_token_reserves);
+          if (priceNow < o.entryPrice) continue;
+          let amount = BigInt(Math.floor(p.addSol * 1e9));
+          const capLamports = state.maxBuyLamports(mint);
+          if (amount > capLamports) amount = capLamports;
+          if (amount > free - txFee) amount = free - txFee;
+          if (amount < BigInt(Math.floor(p.minBuySol * 1e9))) continue;
+          orders.push({ side: 'buy', mint, quote_lamports: amount, max_slippage_bps: p.buySlipBps });
+          buysSent++;
+          free -= amount + txFee;
+          o.adds++;
+          pendingByMint.set(mint, 'buy');
+        }
+      }
 
+      // ---- Entries: one fixed-stake shot per coin that has not pumped yet. ----
       for (const mint of touched) {
         if (orders.length >= cap || slotsLeft <= 0) break;
         const curve = state.curves.get(mint);
@@ -317,31 +333,15 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
         if (t === undefined || t.entered || t.createSlot < 0) continue;
         if (t.devSold) continue;
         const age = now - t.createSlot;
+        if (age < p.entryMinAge || age > p.entryMaxAge) continue;
         const rqSol = Number(curve.real_quote_reserves) / 1e9;
         if (rqSol < p.minRealSol || rqSol > p.maxRealSol) continue;
-        const r = runUpBps(t, curve.virtual_quote_reserves, curve.virtual_token_reserves);
+        if (t.buyers.size < p.minBuyers || t.trades < p.minTrades) continue;
         const netSol = Number(t.bought - t.sold) / 1e9;
-
-        let mode: 'ramp' | 'dip' | null = null;
-        let topShareBps = 10000;
-        if (t.bought > 0n) {
-          let top = 0n;
-          for (const v of t.buyByUser.values()) if (v > top) top = v;
-          topShareBps = Number((top * BPS) / t.bought);
-        }
-        if (age >= p.rampMinAge && age <= p.rampMaxAge && t.buyers.size >= p.rampMinBuyers && t.trades >= p.rampMinTrades && netSol >= p.rampMinNetSol && r >= 0 && r <= p.rampMaxRunUpBps && topShareBps <= p.rampMaxTopShareBps) {
-          mode = 'ramp';
-        } else if (
-          age <= p.dipMaxAge &&
-          t.spikedEarly &&
-          r >= 0 &&
-          r <= p.dipMaxRunUpBps &&
-          t.buyers.size >= p.dipMinBuyers &&
-          netSol >= p.dipMinNetSol
-        ) {
-          mode = 'dip';
-        }
-        if (mode === null) continue;
+        if (netSol < p.minNetSol) continue;
+        const r = runUpBps(t, curve.virtual_quote_reserves, curve.virtual_token_reserves);
+        if (r < 0 || r > p.maxRunUpBps) continue;
+        const priceNow = Number(curve.virtual_quote_reserves) / Number(curve.virtual_token_reserves);
         let amount = BigInt(Math.floor(p.stakeSol * 1e9));
         const capLamports = state.maxBuyLamports(mint);
         if (amount > capLamports) amount = capLamports;
@@ -352,7 +352,7 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
         free -= amount + txFee;
         slotsLeft--;
         t.entered = true;
-        open.set(mint, { openedSlot: now, peakValue: 0n, tookTp1: false });
+        open.set(mint, { openedSlot: now, peakValue: 0n, tookTp1: false, entryNet: t.bought - t.sold, entryPrice: priceNow, adds: 0 });
         pendingByMint.set(mint, 'buy');
       }
       return orders;
@@ -360,7 +360,7 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
 
     onDone(state: BotState, done: Done): void {
       const cash = Number(state.cash) / 1e9;
-      console.error(`second-wave done: cash ${cash.toFixed(6)} SOL, buys sent ${buysSent}, sells sent ${sellsSent}`);
+      console.error(`delayed-ramp done: cash ${cash.toFixed(6)} SOL, buys sent ${buysSent}, sells sent ${sellsSent}`);
     },
   };
 }
