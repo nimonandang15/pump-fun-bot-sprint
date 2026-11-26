@@ -35,6 +35,8 @@ import type { Batch, Bot, BotState, Done, OrderInput, Pubkey } from './vendor/ma
 
 export interface Params {
   // --- Mode RAMP: ride the opening ramp ---
+  /** Youngest age (slots since CreateEvent) at which a ramp buy may be decided. */
+  rampMinAge: number;
   /** Buy a ramp entry while the coin is at most this many slots old. */
   rampMaxAge: number;
   /** Distinct non-creator buyers the opening tape must show. */
@@ -92,9 +94,10 @@ export interface Params {
 }
 
 export const DEFAULT_PARAMS: Params = {
+  rampMinAge: 3,
   rampMaxAge: 5,
-  rampMinBuyers: 4,
-  rampMinTrades: 4,
+  rampMinBuyers: 6,
+  rampMinTrades: 8,
   rampMinNetSol: 0.3,
   rampMaxRunUpBps: 3500,
   dipPeakBps: 100000,
@@ -311,7 +314,7 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
         const netSol = Number(t.bought - t.sold) / 1e9;
 
         let mode: 'ramp' | 'dip' | null = null;
-        if (age <= p.rampMaxAge && t.buyers.size >= p.rampMinBuyers && t.trades >= p.rampMinTrades && netSol >= p.rampMinNetSol && r >= 0 && r <= p.rampMaxRunUpBps) {
+        if (age >= p.rampMinAge && age <= p.rampMaxAge && t.buyers.size >= p.rampMinBuyers && t.trades >= p.rampMinTrades && netSol >= p.rampMinNetSol && r >= 0 && r <= p.rampMaxRunUpBps) {
           mode = 'ramp';
         } else if (
           age <= p.dipMaxAge &&
