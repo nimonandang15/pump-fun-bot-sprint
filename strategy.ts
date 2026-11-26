@@ -47,6 +47,8 @@ export interface Params {
   rampMinNetSol: number;
   /** Price now over the create price, in bps: ramp entry window. */
   rampMaxRunUpBps: number;
+  /** Largest single non-creator buyer's share of buy SOL, in bps, at most. */
+  rampMaxTopShareBps: number;
   // --- Mode DIP: buy the first pullback after a proven spike ---
   /** A dip entry needs the coin to have peaked at least this far over create (bps). */
   dipPeakBps: number;
@@ -99,7 +101,8 @@ export const DEFAULT_PARAMS: Params = {
   rampMinBuyers: 6,
   rampMinTrades: 8,
   rampMinNetSol: 0.3,
-  rampMaxRunUpBps: 10000,
+  rampMaxRunUpBps: 3500,
+  rampMaxTopShareBps: 3000,
   dipPeakBps: 100000,
   dipPeakAge: 30,
   dipMaxRunUpBps: 1200,
@@ -144,6 +147,8 @@ interface Tape {
   vt0: bigint;
   trades: number;
   buyers: Set<Pubkey>;
+  /** SOL bought by each non-creator wallet (lamports). */
+  buyByUser: Map<Pubkey, bigint>;
   bought: bigint;
   sold: bigint;
   devSold: boolean;
@@ -179,6 +184,7 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
         vt0: 0n,
         trades: 0,
         buyers: new Set(),
+        buyByUser: new Map(),
         bought: 0n,
         sold: 0n,
         devSold: false,
@@ -232,7 +238,10 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
           t.lastTradeSlot = e.slot;
           if (e.is_buy) {
             t.bought += sol;
-            if (e.user !== t.creator) t.buyers.add(e.user);
+            if (e.user !== t.creator) {
+              t.buyers.add(e.user);
+              t.buyByUser.set(e.user, (t.buyByUser.get(e.user) ?? 0n) + sol);
+            }
           } else {
             t.sold += sol;
             if (e.user === t.creator) t.devSold = true;
@@ -314,7 +323,13 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot {
         const netSol = Number(t.bought - t.sold) / 1e9;
 
         let mode: 'ramp' | 'dip' | null = null;
-        if (age >= p.rampMinAge && age <= p.rampMaxAge && t.buyers.size >= p.rampMinBuyers && t.trades >= p.rampMinTrades && netSol >= p.rampMinNetSol && r >= 0 && r <= p.rampMaxRunUpBps) {
+        let topShareBps = 10000;
+        if (t.bought > 0n) {
+          let top = 0n;
+          for (const v of t.buyByUser.values()) if (v > top) top = v;
+          topShareBps = Number((top * BPS) / t.bought);
+        }
+        if (age >= p.rampMinAge && age <= p.rampMaxAge && t.buyers.size >= p.rampMinBuyers && t.trades >= p.rampMinTrades && netSol >= p.rampMinNetSol && r >= 0 && r <= p.rampMaxRunUpBps && topShareBps <= p.rampMaxTopShareBps) {
           mode = 'ramp';
         } else if (
           age <= p.dipMaxAge &&
