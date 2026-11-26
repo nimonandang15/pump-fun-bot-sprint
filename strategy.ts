@@ -97,7 +97,7 @@ export const DEFAULT_PARAMS: Params = {
   rampMinTrades: 4,
   rampMinNetSol: 0.3,
   rampMaxRunUpBps: 3500,
-  dipPeakBps: 4000,
+  dipPeakBps: 100000,
   dipPeakAge: 30,
   dipMaxRunUpBps: 1200,
   dipMaxAge: 60,
